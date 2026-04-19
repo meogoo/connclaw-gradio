@@ -260,13 +260,24 @@ class OpenClawCLI:
         # 转义消息中的特殊字符
         escaped_content = content.replace('"', '\\"').replace('$', '\\$')
         
+        # 构建 CLI 命令
         cmd = f'openclaw message send --channel {self.channel} --target {to} --message "{escaped_content}" --json 2>&1 | grep -v "Config warnings"'
+        
+        # 🔍 打印执行的命令（用于调试）
+        print(f"🔧 执行命令: openclaw message send --channel {self.channel} --target {to} --message \"...\" --json")
         
         code, stdout, stderr = self.run_command(cmd, timeout=60)
         
+        # 🔍 打印原始输出（用于调试）
+        print(f"📋 命令返回码: {code}")
+        if stdout:
+            print(f"📋 原始输出 (前500字符):\n{stdout[:500]}")
+        if stderr:
+            print(f"⚠️  标准错误: {stderr[:200]}")
+        
         if code != 0:
             error_msg = stderr if stderr else "未知错误"
-            print(f"❌ 发送失败: {error_msg}")
+            print(f"❌ 发送失败 (退出码 {code}): {error_msg}")
             return {
                 "success": False,
                 "error": error_msg,
@@ -274,12 +285,30 @@ class OpenClawCLI:
             }
         
         try:
+            # 🔧 从输出中提取 JSON 部分
+            # Open Claw 可能在 JSON 前后输出其他日志，需要提取真正的 JSON
+            json_str = stdout.strip()
+            
+            # 尝试找到第一个 { 和最后一个 }
+            start_idx = json_str.find('{')
+            end_idx = json_str.rfind('}')
+            
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                json_str = json_str[start_idx:end_idx + 1]
+                print(f"📋 提取的 JSON (长度: {len(json_str)} 字符)")
+            else:
+                print(f"⚠️  未找到有效的 JSON 结构")
+            
             # 解析 JSON 输出
-            result = json.loads(stdout)
+            result = json.loads(json_str)
+            print(f"✅ JSON 解析成功")
             
             if result.get('payload', {}).get('result'):
                 msg_result = result['payload']['result']
                 print(f"✅ 消息发送成功!")
+                print(f"   - Run ID: {msg_result.get('runId', 'N/A')}")
+                print(f"   - Message ID: {msg_result.get('messageId', 'N/A')}")
+                print(f"   - To JID: {msg_result.get('toJid', 'N/A')}")
                 
                 return {
                     "success": True,
@@ -289,18 +318,20 @@ class OpenClawCLI:
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
             else:
-                print(f"❌ 发送失败: 未收到确认")
+                print(f"❌ 发送失败: 响应中缺少 payload.result")
+                print(f"   响应内容: {json.dumps(result, indent=2, ensure_ascii=False)[:500]}")
                 return {
                     "success": False,
                     "error": "未收到发送确认",
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
                 
-        except json.JSONDecodeError:
-            print(f"❌ 解析响应失败")
+        except json.JSONDecodeError as e:
+            print(f"❌ JSON 解析失败: {e}")
+            print(f"   原始输出 (前1000字符):\n{stdout[:1000]}")
             return {
                 "success": False,
-                "error": f"解析响应失败: {stdout[:200]}",
+                "error": f"解析响应失败: {str(e)}",
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
     
