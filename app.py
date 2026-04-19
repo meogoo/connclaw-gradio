@@ -61,17 +61,23 @@ class OpenClawCLI:
             return True  # 仍然返回 True，允许继续操作
     
     def get_contacts(self) -> List[Dict]:
-        """获取联系人列表"""
+        """获取联系人列表（优化版：减少命令执行次数）"""
         print("📇 获取联系人列表...")
         
         contacts = []
+        source_method = "未知"
         
-        # 方法1: 从 Gateway 状态中获取允许的联系人
-        code, stdout, stderr = self.run_command(
-            "openclaw channels status 2>&1 | grep 'WhatsApp'"
-        )
+        # 优先使用缓存的状态输出（来自 connect()）
+        stdout = getattr(self, '_cached_status_output', None)
         
-        if code == 0 and stdout:
+        if not stdout:
+            print("⚠️  无缓存状态，重新执行 channels status 命令...")
+            code, stdout, stderr = self.run_command(
+                "openclaw channels status 2>&1 | grep 'WhatsApp'"
+            )
+        
+        if stdout:
+            print(f"📋 解析 channels status 输出 (长度: {len(stdout)} 字符)")
             # 查找 allow: 行
             for line in stdout.split('\n'):
                 if 'allow:' in line:
@@ -82,40 +88,64 @@ class OpenClawCLI:
                             for num in numbers.split(',') 
                             if num.strip()
                         ]
-                        break
-                    except:
+                        if contacts:
+                            source_method = "channels status (allow 列表)"
+                            print(f"✅ 从通道配置找到 {len(contacts)} 个联系人:")
+                            for c in contacts:
+                                print(f"   - {c['id']}")
+                            self.contacts_cache = contacts
+                            print(f"📌 联系人来源: {source_method}")
+                            return contacts
+                    except Exception as e:
+                        print(f"⚠️  解析 allow 字段失败: {e}")
                         pass
         
         # 方法2: 如果上面失败，从会话历史中提取联系人
-        if not contacts:
-            print("⚠️  从通道状态获取失败，尝试从会话历史提取...")
-            code, stdout, stderr = self.run_command(
-                "openclaw sessions 2>&1 | grep whatsapp"
-            )
+        print("⚠️  从通道配置获取失败，尝试从会话历史提取...")
+        code, stdout, stderr = self.run_command(
+            "openclaw sessions 2>&1 | grep whatsapp"
+        )
+        
+        if code == 0 and stdout:
+            print(f"📋 解析 sessions 输出 (长度: {len(stdout)} 字符)")
+            session_count = 0
+            for line in stdout.split('\n'):
+                if 'whats' in line.lower():
+                    session_count += 1
+                    # 提取号码部分 (如 whats...290897)
+                    matches = re.findall(r'whats\.\.\.(\d+)', line)
+                    if matches:
+                        for match in matches:
+                            contact_id = f"+86{match}"
+                            contacts.append({
+                                "id": contact_id,
+                                "name": contact_id
+                            })
             
-            if code == 0 and stdout:
-                for line in stdout.split('\n'):
-                    if 'whats' in line.lower():
-                        # 提取号码部分 (如 whats...290897)
-                        matches = re.findall(r'whats\.\.\.(\d+)', line)
-                        if matches:
-                            for match in matches:
-                                contact_id = f"+86{match}"
-                                contacts.append({
-                                    "id": contact_id,
-                                    "name": contact_id
-                                })
+            if contacts:
+                source_method = f"sessions 历史 ({session_count} 个会话)"
+                print(f"✅ 从会话历史找到 {len(contacts)} 个联系人:")
+                for c in contacts:
+                    print(f"   - {c['id']}")
+                self.contacts_cache = contacts
+                print(f"📌 联系人来源: {source_method}")
+                return contacts
+            else:
+                print(f"⚠️  找到 {session_count} 个会话但未能提取到有效号码")
         
         # 方法3: 硬编码已知联系人（作为最后的备选）
-        if not contacts:
-            print("⚠️  自动检测失败，使用默认联系人列表...")
-            contacts = [
-                {"id": "+8618610290897", "name": "+8618610290897"},
-                {"id": "+8618510173921", "name": "+8618510173921"}
-            ]
+        print("⚠️  自动检测失败，使用默认联系人列表...")
+        contacts = [
+            {"id": "+8618610290897", "name": "+8618610290897"},
+            {"id": "+8618510173921", "name": "+8618510173921"}
+        ]
         
+        source_method = "硬编码默认列表"
         self.contacts_cache = contacts
-        print(f"✅ 找到 {len(contacts)} 个联系人")
+        print(f"✅ 使用默认联系人列表 ({len(contacts)} 个):")
+        for c in contacts:
+            print(f"   - {c['id']}")
+        print(f"📌 联系人来源: {source_method}")
         return contacts
     
     def send_message(self, to: str, content: str) -> Dict:
@@ -241,18 +271,42 @@ def select_contact(contact_name: str):
     if not client:
         return [], "❌ 未初始化客户端"
     
-    # 查找联系人
-    contact = next((c for c in client.contacts_cache if c['name'] == contact_name), None)
-    if not contact:
-        return [], f"❌ 找不到联系人: {contact_name}"
+    # 处理 Gradio Dropdown 可能传递列表的情况
+    if isinstance(contact_name, list):
+        if len(contact_name) > 0:
+            contact_name = contact_name[0]  # 取第一个元素
+        else:
+            return [], "❌ 未选择联系人"
     
-    current_contact_name = contact_name
+    if not contact_name:
+        return [], "❌ 未选择联系人"
+    
+    print(f"📌 尝试选择联系人: {contact_name} (类型: {type(contact_name).__name__})")
+    
+    # 查找联系人（支持按名称或 ID 匹配）
+    contact = next((c for c in client.contacts_cache 
+                   if c['name'] == contact_name or c['id'] == contact_name), None)
+    
+    if not contact:
+        print(f"❌ 在缓存中未找到联系人: {contact_name}")
+        print(f"   当前缓存的联系人: {[c['id'] for c in client.contacts_cache]}")
+        
+        # 如果找不到，假设用户手动输入了号码，创建一个临时联系人对象
+        if contact_name.startswith('+'):
+            print(f"✅ 使用手动输入的号码: {contact_name}")
+            contact = {"id": contact_name, "name": contact_name}
+            # 添加到缓存
+            client.contacts_cache.append(contact)
+        else:
+            return [], f"❌ 找不到联系人: {contact_name}\n💡 提示：请输入完整的电话号码（如 +8618610290897）"
+    
+    current_contact_name = contact['name']
     client.select_contact(contact['id'])
     
     # 加载历史消息
     messages = client.get_messages(contact['id'])
     
-    return messages, f"💬 正在与 {contact_name} 聊天"
+    return messages, f"💬 正在与 {contact['name']} 聊天"
 
 
 def send_message(user_message: str, chat_history: List):
