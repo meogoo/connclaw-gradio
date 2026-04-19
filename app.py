@@ -347,63 +347,69 @@ class OpenClawCLI:
 # 全局变量
 client = None
 current_contact_name = ""
+contact_buttons_state = []  # 存储联系人按钮组件引用
 
 
 def init_client():
     """初始化客户端"""
-    global client
+    global client, contact_buttons_state
     
     try:
+        print("\n" + "="*60)
+        print("🔄 正在初始化 ConnClaw...")
+        print("="*60)
+        
+        # 步骤 1: 创建客户端
+        print("\n[1/3] 创建 CLI 客户端...")
         client = OpenClawCLI()
-        if client.connect():
-            contacts = client.get_contacts()
-            # 转换联系人格式以适应 Dropdown
-            contact_choices = [c['name'] for c in contacts]
-            return contact_choices, "✅ 连接成功！请选择联系人开始聊天"
-        else:
-            return [], "❌ 连接失败：无法连接到 Open Claw Gateway"
+        
+        # 步骤 2: 测试连接
+        print("[2/3] 测试与 Open Claw Gateway 的连接...")
+        if not client.connect():
+            print("❌ 连接失败")
+            return gr.update(choices=[]), "❌ 连接失败：无法连接到 Open Claw Gateway", gr.update(visible=False)
+        
+        # 步骤 3: 获取联系人
+        print("[3/3] 获取联系人列表...")
+        contacts = client.get_contacts()
+        
+        # 转换联系人格式以适应 Radio - 使用 tuple() 确保是元组
+        contact_choices = [tuple([c['name'], c['id']]) for c in contacts]
+        
+        print("\n" + "="*60)
+        print(f"✅ 初始化完成！找到 {len(contacts)} 个联系人")
+        print(f"   联系人格式: {contact_choices[:2]}")  # 打印前两个用于调试
+        print("="*60 + "\n")
+        
+        # 返回联系人列表、状态信息和显示联系人区域的更新
+        return gr.update(choices=contact_choices), f"✅ 连接成功！找到 {len(contacts)} 个联系人，请点击选择开始聊天", gr.update(visible=True)
+        
     except Exception as e:
         import traceback
         error_detail = traceback.format_exc()
-        print(f"❌ 连接错误:\n{error_detail}")
-        return [], f"❌ 连接失败: {str(e)}"
+        print(f"\n❌ 连接错误:\n{error_detail}")
+        return gr.update(choices=[]), f"❌ 连接失败: {str(e)}", gr.update(visible=False)
 
 
-def select_contact(contact_name: str):
-    """选择联系人"""
+def select_contact(contact_id: str):
+    """选择联系人（通过 Radio 组件）"""
     global current_contact_name
     
     if not client:
         return [], "❌ 未初始化客户端"
     
-    # 处理 Gradio Dropdown 可能传递列表的情况
-    if isinstance(contact_name, list):
-        if len(contact_name) > 0:
-            contact_name = contact_name[0]  # 取第一个元素
-        else:
-            return [], "❌ 未选择联系人"
+    if not contact_id:
+        return [], "⚠️  请先选择一个联系人"
     
-    if not contact_name:
-        return [], "❌ 未选择联系人"
+    print(f"📌 尝试选择联系人 ID: {contact_id}")
     
-    print(f"📌 尝试选择联系人: {contact_name} (类型: {type(contact_name).__name__})")
-    
-    # 查找联系人（支持按名称或 ID 匹配）
-    contact = next((c for c in client.contacts_cache 
-                   if c['name'] == contact_name or c['id'] == contact_name), None)
+    # 查找联系人（支持按 ID 匹配）
+    contact = next((c for c in client.contacts_cache if c['id'] == contact_id), None)
     
     if not contact:
-        print(f"❌ 在缓存中未找到联系人: {contact_name}")
+        print(f"❌ 在缓存中未找到联系人: {contact_id}")
         print(f"   当前缓存的联系人: {[c['id'] for c in client.contacts_cache]}")
-        
-        # 如果找不到，假设用户手动输入了号码，创建一个临时联系人对象
-        if contact_name.startswith('+'):
-            print(f"✅ 使用手动输入的号码: {contact_name}")
-            contact = {"id": contact_name, "name": contact_name}
-            # 添加到缓存
-            client.contacts_cache.append(contact)
-        else:
-            return [], f"❌ 找不到联系人: {contact_name}\n💡 提示：请输入完整的电话号码（如 +8618610290897）"
+        return [], f"❌ 找不到联系人: {contact_id}"
     
     current_contact_name = contact['name']
     client.select_contact(contact['id'])
@@ -411,7 +417,10 @@ def select_contact(contact_name: str):
     # 加载历史消息
     messages = client.get_messages(contact['id'])
     
-    return messages, f"💬 正在与 {contact['name']} 聊天"
+    status_msg = f"💬 正在与 {contact['name']} 聊天"
+    print(f"✅ {status_msg}")
+    
+    return messages, status_msg
 
 
 def send_message(user_message: str, chat_history: List):
@@ -463,17 +472,21 @@ with gr.Blocks(title="ConnClaw - WhatsApp Chat (CLI Mode)", theme=gr.themes.Soft
             gr.Markdown("### 📇 联系人")
             status_text = gr.Textbox(label="状态", value="点击连接按钮开始", interactive=False)
             connect_btn = gr.Button("🔌 连接到 Open Claw", variant="primary")
-            contact_dropdown = gr.Dropdown(
-                label="选择联系人", 
-                choices=[], 
-                interactive=False,
-                allow_custom_value=True  # 允许手动输入号码
-            )
-            gr.Markdown("""
-            **💡 提示:**
-            - 如果联系人列表为空，可以手动输入号码
-            - 格式: +8618610290897
-            """)
+            
+            # 联系人选择区域（初始隐藏）
+            with gr.Column(visible=False) as contacts_section:
+                gr.Markdown("**选择联系人:**")
+                contact_radio = gr.Radio(
+                    label="",
+                    choices=[],
+                    interactive=True,
+                    info="点击选择联系人"
+                )
+                gr.Markdown("""
+                **💡 提示:**
+                - 点击任意联系人即可开始聊天
+                - 历史消息会自动加载
+                """)
         
         # 右侧：聊天界面
         with gr.Column(scale=3):
@@ -482,7 +495,7 @@ with gr.Blocks(title="ConnClaw - WhatsApp Chat (CLI Mode)", theme=gr.themes.Soft
             with gr.Row():
                 msg_input = gr.Textbox(
                     label="输入消息", 
-                    placeholder="输入消息后按 Enter 或点击发送...", 
+                    placeholder="请先选择联系人...", 
                     lines=2, 
                     interactive=False
                 )
@@ -498,18 +511,18 @@ with gr.Blocks(title="ConnClaw - WhatsApp Chat (CLI Mode)", theme=gr.themes.Soft
     # 事件绑定
     connect_btn.click(
         fn=init_client,
-        outputs=[contact_dropdown, status_text]
+        outputs=[contact_radio, status_text, contacts_section]
     ).then(
         fn=lambda: gr.update(interactive=True),
-        outputs=[contact_dropdown]
+        outputs=[contact_radio]
     )
     
-    contact_dropdown.change(
+    contact_radio.change(
         fn=select_contact,
-        inputs=[contact_dropdown],
+        inputs=[contact_radio],
         outputs=[chatbot, status_text]
     ).then(
-        fn=lambda: (gr.update(interactive=True), gr.update(interactive=True)),
+        fn=lambda: (gr.update(interactive=True, placeholder="输入消息后按 Enter 或点击发送..."), gr.update(interactive=True)),
         outputs=[msg_input, send_btn]
     )
     
