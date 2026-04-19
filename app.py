@@ -61,13 +61,118 @@ class OpenClawCLI:
             return True  # 仍然返回 True，允许继续操作
     
     def get_contacts(self) -> List[Dict]:
-        """获取联系人列表（优化版：减少命令执行次数）"""
+        """获取联系人列表（优化版：优先从配置文件读取）"""
         print("📇 获取联系人列表...")
         
         contacts = []
         source_method = "未知"
         
-        # 优先使用缓存的状态输出（来自 connect()）
+        # 方法1: 直接从 Open Claw 配置文件读取 allowFrom（最快最可靠）
+        print("🔍 尝试从配置文件读取 allowFrom...")
+        
+        # 优先检查项目目录下的配置文件，其次检查用户主目录
+        local_config = os.path.join(os.path.dirname(__file__), "openclaw.json")
+        user_config = os.path.expanduser("~/.openclaw/openclaw.json")
+        
+        config_path = None
+        if os.path.exists(local_config):
+            config_path = local_config
+            print(f"   📄 使用项目目录配置: {local_config}")
+        elif os.path.exists(user_config):
+            config_path = user_config
+            print(f"   📄 使用用户配置: {user_config}")
+        else:
+            print(f"   ⚠️  配置文件不存在 (已检查: {local_config}, {user_config})")
+        
+        if config_path:
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                
+                print(f"   ✅ JSON 解析成功")
+                
+                # 多种方式查找 WhatsApp 配置（兼容不同格式）
+                whatsapp_config = None
+                
+                # 方式1: channels.whatsapp (标准格式)
+                if 'channels' in config:
+                    if isinstance(config['channels'], dict):
+                        whatsapp_config = config['channels'].get('whatsapp', {})
+                        if whatsapp_config:
+                            print(f"   📋 找到路径: channels.whatsapp")
+                    else:
+                        print(f"   ⚠️  channels 字段类型错误: {type(config['channels']).__name__}，期望 dict")
+                
+                # 方式2: 直接在根级别 (简化格式)
+                if not whatsapp_config and 'whatsapp' in config:
+                    whatsapp_config = config['whatsapp']
+                    if isinstance(whatsapp_config, dict):
+                        print(f"   📋 找到路径: whatsapp (根级别)")
+                    else:
+                        print(f"   ⚠️  whatsapp 字段类型错误: {type(whatsapp_config).__name__}，期望 dict")
+                        whatsapp_config = None
+                
+                if whatsapp_config and isinstance(whatsapp_config, dict):
+                    # 尝试多个可能的字段名（按优先级）
+                    allow_from = None
+                    found_field = None
+                    
+                    for field_name in ['allowFrom', 'allow_from', 'allowedNumbers', 'contacts']:
+                        if field_name in whatsapp_config:
+                            allow_from = whatsapp_config[field_name]
+                            found_field = field_name
+                            print(f"   📋 找到字段: {field_name} (类型: {type(allow_from).__name__})")
+                            break
+                    
+                    if allow_from is not None:
+                        if isinstance(allow_from, list):
+                            # 过滤并转换联系人列表
+                            contacts = []
+                            for num in allow_from:
+                                if num is None:
+                                    continue
+                                num_str = str(num).strip()
+                                if num_str:
+                                    contacts.append({"id": num_str, "name": num_str})
+                            
+                            if contacts:
+                                source_method = f"配置文件 {found_field} ({len(contacts)} 个联系人)"
+                                print(f"   ✅ 从配置文件找到 {len(contacts)} 个联系人:")
+                                for c in contacts:
+                                    print(f"      - {c['id']}")
+                                self.contacts_cache = contacts
+                                print(f"   📌 联系人来源: {source_method}")
+                                return contacts
+                            else:
+                                print(f"   ⚠️  {found_field} 列表为空或所有条目无效")
+                        else:
+                            print(f"   ⚠️  {found_field} 字段类型错误: {type(allow_from).__name__}，期望 list")
+                            print(f"      实际值: {allow_from}")
+                    else:
+                        print(f"   ⚠️  WhatsApp 配置中未找到任何联系人字段")
+                        print(f"      可用字段: {list(whatsapp_config.keys())}")
+                else:
+                    print("   ⚠️  配置文件中未找到 WhatsApp 通道配置")
+                    # 显示可用的顶级键以便调试
+                    if isinstance(config, dict):
+                        top_keys = list(config.keys())
+                        print(f"      配置文件顶级键: {top_keys[:10]}{'...' if len(top_keys) > 10 else ''}")
+                    
+            except json.JSONDecodeError as e:
+                print(f"   ❌ JSON 解析失败: {e}")
+                print(f"      文件: {config_path}")
+                print(f"      提示: 请检查 JSON 格式是否正确")
+            except PermissionError as e:
+                print(f"   ❌ 权限不足，无法读取配置文件: {e}")
+                print(f"      文件: {config_path}")
+                print(f"      提示: 请检查文件权限 (当前需要可读)")
+            except Exception as e:
+                print(f"   ❌ 读取配置文件失败: {type(e).__name__}: {e}")
+                import traceback
+                print(f"      详细错误:\n{traceback.format_exc()}")
+        
+        # 方法2: 从 Gateway 状态中获取允许的联系人
+        print("⚠️  从配置文件读取失败，尝试从 channels status 获取...")
         stdout = getattr(self, '_cached_status_output', None)
         
         if not stdout:
@@ -100,7 +205,7 @@ class OpenClawCLI:
                         print(f"⚠️  解析 allow 字段失败: {e}")
                         pass
         
-        # 方法2: 如果上面失败，从会话历史中提取联系人
+        # 方法3: 如果上面失败，从会话历史中提取联系人
         print("⚠️  从通道配置获取失败，尝试从会话历史提取...")
         code, stdout, stderr = self.run_command(
             "openclaw sessions 2>&1 | grep whatsapp"
@@ -133,7 +238,7 @@ class OpenClawCLI:
             else:
                 print(f"⚠️  找到 {session_count} 个会话但未能提取到有效号码")
         
-        # 方法3: 硬编码已知联系人（作为最后的备选）
+        # 方法4: 硬编码已知联系人（作为最后的备选）
         print("⚠️  自动检测失败，使用默认联系人列表...")
         contacts = [
             {"id": "+8618610290897", "name": "+8618610290897"},
