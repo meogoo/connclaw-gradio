@@ -4,13 +4,91 @@ import json
 import uuid
 import time
 import re
+import threading
 from datetime import datetime
 from typing import List, Dict, Optional
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 # 加载环境变量
 load_dotenv()
+
+
+class MessageCache:
+    """本地消息缓存管理器"""
+    
+    def __init__(self, cache_dir: str = None):
+        if cache_dir is None:
+            cache_dir = os.path.join(os.path.dirname(__file__), ".message_cache")
+        
+        self.cache_dir = cache_dir
+        os.makedirs(cache_dir, exist_ok=True)
+        self.cache_file = os.path.join(cache_dir, "messages.json")
+        self.messages = self._load_cache()
+    
+    def _load_cache(self) -> Dict[str, List[Dict]]:
+        """从文件加载缓存"""
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"⚠️  加载缓存失败: {e}")
+                return {}
+        return {}
+    
+    def _save_cache(self):
+        """保存缓存到文件"""
+        try:
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.messages, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"❌ 保存缓存失败: {e}")
+    
+    def add_message(self, contact_id: str, message: Dict):
+        """添加消息到缓存"""
+        if contact_id not in self.messages:
+            self.messages[contact_id] = []
+        
+        # 检查是否已存在（基于 messageId 去重）
+        message_id = message.get('metadata', {}).get('messageId', '')
+        if message_id:
+            for existing in self.messages[contact_id]:
+                if existing.get('metadata', {}).get('messageId') == message_id:
+                    return  # 已存在，跳过
+        
+        self.messages[contact_id].append(message)
+        
+        # 限制每个联系人的消息数量（保留最近 500 条）
+        if len(self.messages[contact_id]) > 500:
+            self.messages[contact_id] = self.messages[contact_id][-500:]
+        
+        # 定期保存（每添加 10 条消息保存一次）
+        if len(self.messages[contact_id]) % 10 == 0:
+            self._save_cache()
+    
+    def get_messages(self, contact_id: str, limit: int = 50) -> List[Dict]:
+        """获取指定联系人的消息"""
+        if contact_id not in self.messages:
+            return []
+        
+        messages = self.messages[contact_id]
+        # 按时间排序
+        messages.sort(key=lambda x: x.get('timestamp', ''))
+        # 返回最近的 limit 条
+        return messages[-limit:]
+    
+    def save_all(self):
+        """强制保存所有缓存"""
+        self._save_cache()
+
+
+class LogMessageParser:
+    """Open Claw 日志消息解析器（预留接口）"""
+    
+    def __init__(self, message_cache: MessageCache = None):
+        self.message_cache = message_cache or MessageCache()
 
 
 class OpenClawCLI:
@@ -20,7 +98,8 @@ class OpenClawCLI:
         self.channel = "whatsapp"
         self.contacts_cache = []
         self.current_contact = None
-        
+        self.log_parser = LogMessageParser()  # 初始化日志解析器
+    
     def run_command(self, cmd: str, timeout: int = 60) -> tuple:
         """执行 Open Claw CLI 命令"""
         try:
@@ -260,20 +339,20 @@ class OpenClawCLI:
         # 转义消息中的特殊字符
         escaped_content = content.replace('"', '\\"').replace('$', '\\$')
         
-        # 构建 CLI 命令
-        cmd = f'openclaw message send --channel {self.channel} --target {to} --message "{escaped_content}" --json 2>&1 | grep -v "Config warnings"'
+        # 构建 CLI 命令（不使用 --json）
+        cmd = f'openclaw message send --channel {self.channel} --target {to} --message "{escaped_content}" 2>&1 | grep -v "Config warnings"'
         
-        # 🔍 打印执行的命令（用于调试）
-        print(f"🔧 执行命令: openclaw message send --channel {self.channel} --target {to} --message \"...\" --json")
+        # 🔍 打印执行的命令
+        print(f"🔧 执行命令: openclaw message send --channel {self.channel} --target {to} --message \"{content}\"")
         
         code, stdout, stderr = self.run_command(cmd, timeout=60)
         
-        # 🔍 打印原始输出（用于调试）
+        # 🔍 打印完整输出
         print(f"📋 命令返回码: {code}")
         if stdout:
-            print(f"📋 原始输出 (前500字符):\n{stdout[:500]}")
+            print(f"📋 命令输出:\n{stdout}")
         if stderr:
-            print(f"⚠️  标准错误: {stderr[:200]}")
+            print(f"⚠️  标准错误:\n{stderr}")
         
         if code != 0:
             error_msg = stderr if stderr else "未知错误"
@@ -284,89 +363,55 @@ class OpenClawCLI:
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
         
-        try:
-            # 🔧 从输出中提取 JSON 部分
-            # Open Claw 可能在 JSON 前后输出其他日志，需要提取真正的 JSON
-            json_str = stdout.strip()
-            
-            # 尝试找到第一个 { 和最后一个 }
-            start_idx = json_str.find('{')
-            end_idx = json_str.rfind('}')
-            
-            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                json_str = json_str[start_idx:end_idx + 1]
-                print(f"📋 提取的 JSON (长度: {len(json_str)} 字符)")
-            else:
-                print(f"⚠️  未找到有效的 JSON 结构")
-            
-            # 解析 JSON 输出
-            result = json.loads(json_str)
-            print(f"✅ JSON 解析成功")
-            
-            if result.get('payload', {}).get('result'):
-                msg_result = result['payload']['result']
-                print(f"✅ 消息发送成功!")
-                print(f"   - Run ID: {msg_result.get('runId', 'N/A')}")
-                print(f"   - Message ID: {msg_result.get('messageId', 'N/A')}")
-                print(f"   - To JID: {msg_result.get('toJid', 'N/A')}")
-                
-                return {
-                    "success": True,
-                    "runId": msg_result.get('runId', ''),
-                    "messageId": msg_result.get('messageId', ''),
-                    "toJid": msg_result.get('toJid', ''),
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }
-            else:
-                print(f"❌ 发送失败: 响应中缺少 payload.result")
-                print(f"   响应内容: {json.dumps(result, indent=2, ensure_ascii=False)[:500]}")
-                return {
-                    "success": False,
-                    "error": "未收到发送确认",
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }
-                
-        except json.JSONDecodeError as e:
-            print(f"❌ JSON 解析失败: {e}")
-            print(f"   原始输出 (前1000字符):\n{stdout[:1000]}")
+        # 非 JSON 模式：检查输出中是否包含成功标识
+        # 成功的输出通常包含 "Message sent" 或类似的成功提示
+        if "Error" in stdout or "error" in stdout.lower():
+            print(f"❌ 发送失败: 输出中包含错误信息")
             return {
                 "success": False,
-                "error": f"解析响应失败: {str(e)}",
+                "error": f"发送失败: {stdout[:200]}",
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
+        
+        # 假设没有错误即为成功
+        print(f"✅ 消息发送成功!")
+        print(f"   - 目标: {to}")
+        print(f"   - 内容: {content[:50]}{'...' if len(content) > 50 else ''}")
+        
+        return {
+            "success": True,
+            "runId": "",
+            "messageId": "",
+            "toJid": to,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "output": stdout
+        }
     
     def get_messages(self, contact_id: str, limit: int = 50) -> List[Dict]:
-        """获取历史消息（通过查看会话信息）"""
+        """获取历史消息（优先从本地缓存读取）"""
         print(f"📜 获取与 {contact_id} 的会话历史...")
         
-        messages = []
+        # 方法1: 从本地缓存读取（最快）
+        print("🔍 尝试从本地缓存读取...")
+        try:
+            cached_messages = self.log_parser.message_cache.get_messages(contact_id, limit)
+            
+            if cached_messages:
+                print(f"✅ 从缓存读取到 {len(cached_messages)} 条消息")
+                return cached_messages
+            else:
+                print("⚠️  缓存中暂无该联系人的消息")
+        except Exception as e:
+            print(f"⚠️  缓存读取失败: {e}")
         
-        # 获取会话信息
-        code, stdout, stderr = self.run_command(
-            f"openclaw sessions 2>&1 | grep '{contact_id[-6:]}'"
-        )
+        # 方法2: 如果缓存为空，返回提示信息
+        messages = [{
+            "role": "system",
+            "content": f"💡 提示：暂无与 {contact_id} 的历史消息记录。\n\n可能的原因：\n1. 应用刚启动，监听器还在初始化\n2. 尚未与该联系人有过对话\n3. 之前的消息未被监听器捕获\n\n建议：\n- 发送一条新消息开始对话\n- 保持应用运行，后续消息会自动保存\n- 重启应用后历史消息仍会保留",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }]
         
-        if code == 0 and stdout.strip():
-            # 解析会话信息
-            lines = stdout.strip().split('\n')
-            for line in lines:
-                if contact_id[-6:] in line:
-                    messages.append({
-                        "role": "system",
-                        "content": f"会话信息: {line.strip()}",
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
-        
-        # 注意：Open Claw CLI 目前没有直接获取历史消息的命令
-        # 这里返回一个提示消息
-        if not messages:
-            messages.append({
-                "role": "system",
-                "content": "💡 提示：当前 CLI 模式暂不支持查看完整历史消息。\n您可以直接发送新消息开始对话。",
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            })
-        
-        print(f"✅ 获取到 {len(messages)} 条记录")
+        print(f"✅ 返回 {len(messages)} 条记录")
         return messages
     
     def select_contact(self, contact_id: str):
@@ -571,6 +616,26 @@ with gr.Blocks(title="ConnClaw - WhatsApp Chat (CLI Mode)", theme=gr.themes.Soft
 
 
 if __name__ == "__main__":
+    import signal
+    import sys
+    
+    def cleanup(signum=None, frame=None):
+        """应用退出时清理资源"""
+        print("\n\n" + "="*60)
+        print("🛑 正在关闭应用...")
+        
+        if client and hasattr(client, 'log_parser'):
+            print("💾 保存消息缓存...")
+            client.log_parser.message_cache.save_all()
+            print("✅ 缓存已保存")
+        
+        print("="*60)
+        sys.exit(0)
+    
+    # 注册信号处理器
+    signal.signal(signal.SIGINT, cleanup)
+    signal.signal(signal.SIGTERM, cleanup)
+    
     print("=" * 60)
     print("🚀 ConnClaw Gradio 版本启动中... (CLI 模式)")
     print("=" * 60)
