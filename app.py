@@ -14,6 +14,9 @@ from dotenv import load_dotenv
 # 加载环境变量
 load_dotenv()
 
+# 导入 WhatsApp 消息解析器
+from whatsapp_message_parser import WhatsAppMessageParser
+
 
 class MessageCache:
     """本地消息缓存管理器"""
@@ -94,11 +97,32 @@ class LogMessageParser:
 class OpenClawCLI:
     """Open Claw CLI 客户端 - 通过命令行调用实现收发消息"""
     
-    def __init__(self):
+    def __init__(self, user_number: str = None):
         self.channel = "whatsapp"
         self.contacts_cache = []
         self.current_contact = None
         self.log_parser = LogMessageParser()  # 初始化日志解析器
+        
+        # 强制从环境变量读取用户号码
+        if not user_number:
+            user_number = os.environ.get('CURRENT_USER_NUMBER', '').strip()
+        
+        # 验证用户号码
+        if not user_number:
+            print("❌ 错误: 未设置 CURRENT_USER_NUMBER 环境变量")
+            print("   请确保通过 start.sh 启动应用")
+            print("   或手动设置: export CURRENT_USER_NUMBER='+86xxxxxxxxxxx'")
+            sys.exit(1)
+        
+        self.user_number = user_number
+        print(f"✅ 当前用户号码: {self.user_number}")
+        
+        # 初始化 WhatsApp 消息解析器
+        log_file_path = os.path.join(os.path.dirname(__file__), "whatsapp_messages.log")
+        self.whatsapp_parser = WhatsAppMessageParser(log_file=log_file_path)
+        
+        # 设置用户号码到解析器
+        self.whatsapp_parser.set_user_number(self.user_number)
     
     def run_command(self, cmd: str, timeout: int = 60) -> tuple:
         """执行 Open Claw CLI 命令"""
@@ -332,6 +356,29 @@ class OpenClawCLI:
         print(f"📌 联系人来源: {source_method}")
         return contacts
     
+    def get_contacts_excluding_self(self) -> List[Dict]:
+        """获取联系人列表，排除当前用户自己"""
+        all_contacts = self.get_contacts()
+        
+        if not self.user_number:
+            print("⚠️  未设置用户号码，返回所有联系人")
+            return all_contacts
+        
+        # 过滤掉当前用户自己的号码
+        filtered_contacts = [
+            contact for contact in all_contacts 
+            if contact['id'] != self.user_number
+        ]
+        
+        excluded_count = len(all_contacts) - len(filtered_contacts)
+        if excluded_count > 0:
+            print(f"✅ 已排除 {excluded_count} 个自己的号码: {self.user_number}")
+            print(f"   剩余联系人: {len(filtered_contacts)} 个")
+        else:
+            print(f"✅ 返回所有联系人: {len(filtered_contacts)} 个")
+        
+        return filtered_contacts
+    
     def send_message(self, to: str, content: str) -> Dict:
         """发送消息到指定号码"""
         print(f"📤 发送消息到 {to}...")
@@ -388,10 +435,32 @@ class OpenClawCLI:
         }
     
     def get_messages(self, contact_id: str, limit: int = 50) -> List[Dict]:
-        """获取历史消息（优先从本地缓存读取）"""
+        """获取历史消息（从 WhatsApp 日志文件读取）"""
         print(f"📜 获取与 {contact_id} 的会话历史...")
         
-        # 方法1: 从本地缓存读取（最快）
+        # user_number 已在 __init__ 中强制设置，这里直接使用
+        # 不需要再从其他地方读取
+        
+        # 从日志文件中解析消息
+        print("🔍 从 WhatsApp 日志文件读取消息...")
+        try:
+            messages = self.whatsapp_parser.parse_log_file(
+                contact_filter=contact_id,
+                max_lines=2000  # 最多处理2000行
+            )
+            
+            if messages:
+                print(f"✅ 从日志文件读取到 {len(messages)} 条消息")
+                # 返回最近的 limit 条
+                return messages[-limit:]
+            else:
+                print("⚠️  日志文件中暂无该联系人的消息")
+        except Exception as e:
+            print(f"⚠️  日志文件读取失败: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # 如果日志文件也没有，尝试从缓存读取
         print("🔍 尝试从本地缓存读取...")
         try:
             cached_messages = self.log_parser.message_cache.get_messages(contact_id, limit)
@@ -400,14 +469,14 @@ class OpenClawCLI:
                 print(f"✅ 从缓存读取到 {len(cached_messages)} 条消息")
                 return cached_messages
             else:
-                print("⚠️  缓存中暂无该联系人的消息")
+                print("⚠️  缓存中也暂无该联系人的消息")
         except Exception as e:
             print(f"⚠️  缓存读取失败: {e}")
         
-        # 方法2: 如果缓存为空，返回提示信息
+        # 方法3: 如果都没有，返回提示信息
         messages = [{
             "role": "system",
-            "content": f"💡 提示：暂无与 {contact_id} 的历史消息记录。\n\n可能的原因：\n1. 应用刚启动，监听器还在初始化\n2. 尚未与该联系人有过对话\n3. 之前的消息未被监听器捕获\n\n建议：\n- 发送一条新消息开始对话\n- 保持应用运行，后续消息会自动保存\n- 重启应用后历史消息仍会保留",
+            "content": f"💡 提示：暂无与 {contact_id} 的历史消息记录。\n\n可能的原因：\n1. 尚未与该联系人有过对话\n2. 日志监听器还未启动或未捕获到消息\n\n建议：\n- 发送一条新消息开始对话\n- 确保 start.sh 已正确启动日志监听器\n- 检查 whatsapp_messages.log 文件是否存在",
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }]
         
@@ -426,18 +495,24 @@ current_contact_name = ""
 contact_buttons_state = []  # 存储联系人按钮组件引用
 
 
-def init_client():
-    """初始化客户端"""
+def init_client(user_number: str = None):
+    """初始化客户端
+    
+    Args:
+        user_number: 当前用户的号码（可选），如果提供则用于过滤联系人列表
+    """
     global client, contact_buttons_state
     
     try:
         print("\n" + "="*60)
         print("🔄 正在初始化 ConnClaw...")
+        if user_number:
+            print(f"📌 用户号码: {user_number}")
         print("="*60)
         
         # 步骤 1: 创建客户端
         print("\n[1/3] 创建 CLI 客户端...")
-        client = OpenClawCLI()
+        client = OpenClawCLI(user_number=user_number)
         
         # 步骤 2: 测试连接
         print("[2/3] 测试与 Open Claw Gateway 的连接...")
@@ -445,15 +520,17 @@ def init_client():
             print("❌ 连接失败")
             return gr.update(choices=[]), "❌ 连接失败：无法连接到 Open Claw Gateway", gr.update(visible=False)
         
-        # 步骤 3: 获取联系人
+        # 步骤 3: 获取联系人列表（排除自己）
         print("[3/3] 获取联系人列表...")
-        contacts = client.get_contacts()
+        contacts = client.get_contacts_excluding_self()
         
         # 转换联系人格式以适应 Radio - 使用 tuple() 确保是元组
         contact_choices = [tuple([c['name'], c['id']]) for c in contacts]
         
         print("\n" + "="*60)
         print(f"✅ 初始化完成！找到 {len(contacts)} 个联系人")
+        if user_number:
+            print(f"   已排除自己的号码: {user_number}")
         print(f"   联系人格式: {contact_choices[:2]}")  # 打印前两个用于调试
         print("="*60 + "\n")
         
@@ -585,8 +662,12 @@ with gr.Blocks(title="ConnClaw - WhatsApp Chat (CLI Mode)", theme=gr.themes.Soft
             """)
     
     # 事件绑定
+    def connect_with_user_number():
+        """包装函数，初始化客户端（user_number 会在 OpenClawCLI.__init__ 中从环境变量自动读取）"""
+        return init_client()  # 不传参数，让 __init__ 自动从环境变量读取
+    
     connect_btn.click(
-        fn=init_client,
+        fn=connect_with_user_number,
         outputs=[contact_radio, status_text, contacts_section]
     ).then(
         fn=lambda: gr.update(interactive=True),
@@ -636,10 +717,18 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
     
+    # 从环境变量读取用户号码
+    user_number = os.environ.get('CURRENT_USER_NUMBER')
+    if user_number:
+        print("=" * 60)
+        print(f"📱 当前用户号码: {user_number}")
+        print("=" * 60)
+    
     print("=" * 60)
     print("🚀 ConnClaw Gradio 版本启动中... (CLI 模式)")
     print("=" * 60)
     print("✅ 使用 Open Claw CLI 进行消息收发")
     print("ℹ️  无需 WebSocket 设备配对")
+    print("📇 联系人列表将自动排除当前用户")
     print("=" * 60)
     demo.launch(server_name="0.0.0.0", server_port=7689, share=False)

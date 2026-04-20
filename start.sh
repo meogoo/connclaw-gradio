@@ -46,6 +46,103 @@ fi
 echo "✅ Python 版本: $(python --version)"
 echo ""
 
+# 配置当前用户号码
+echo "=========================================="
+echo "📱 配置当前用户号码"
+echo "=========================================="
+
+while true; do
+    USER_NUMBER=""
+    
+    # 提示用户输入号码
+    read -p "请输入您的 WhatsApp 号码 (+86xxxxxxxxxxx): " USER_NUMBER
+    
+    # 验证号码格式
+    if [[ ! "$USER_NUMBER" =~ ^\+86[0-9]{11}$ ]]; then
+        echo "❌ 号码格式错误！应该是 +86 开头的 13 位数字"
+        echo "   例如: +8618610290897"
+        echo ""
+        continue
+    fi
+    
+    echo "✅ 您输入的号码: $USER_NUMBER"
+    echo ""
+    
+    # 验证1: 从 openclaw.json 检查
+    VALIDATED=false
+    CONFIG_PATHS=(
+        "$(pwd)/openclaw.json"
+        "$HOME/.openclaw/openclaw.json"
+    )
+    
+    for config_path in "${CONFIG_PATHS[@]}"; do
+        if [ -f "$config_path" ]; then
+            ALLOWED_FROM_JSON=$(python3 -c "
+import json
+try:
+    with open('$config_path', 'r') as f:
+        config = json.load(f)
+    whatsapp_config = config.get('channels', {}).get('whatsapp', {}) or config.get('whatsapp', {})
+    allow_from = (
+        whatsapp_config.get('allowFrom') or
+        whatsapp_config.get('allow_from') or
+        whatsapp_config.get('allowedNumbers') or
+        whatsapp_config.get('contacts') or
+        []
+    )
+    if isinstance(allow_from, list) and '$USER_NUMBER' in [str(x) for x in allow_from]:
+        print('FOUND')
+except:
+    pass
+" 2>/dev/null)
+            
+            if [ "$ALLOWED_FROM_JSON" = "FOUND" ]; then
+                echo "✅ 验证通过: $USER_NUMBER 在 $config_path 中"
+                VALIDATED=true
+                break
+            fi
+        fi
+    done
+    
+    # 验证2: 如果配置文件未找到，从 channels status 检查
+    if [ "$VALIDATED" = false ]; then
+        echo "🔍 检查 channels status..."
+        ALLOWED_FROM_STATUS=$(openclaw channels status 2>&1 | grep -i whatsapp | grep -oP 'allow:\s*\K.*' || echo "")
+        
+        if [ -n "$ALLOWED_FROM_STATUS" ] && echo "$ALLOWED_FROM_STATUS" | grep -q "$USER_NUMBER"; then
+            echo "✅ 验证通过: $USER_NUMBER 在 channels status 的 allow 列表中"
+            echo "   allow 列表: $ALLOWED_FROM_STATUS"
+            VALIDATED=true
+        else
+            echo "⚠️  验证失败: $USER_NUMBER 不在任何允许的联系人列表中"
+            if [ -n "$ALLOWED_FROM_STATUS" ]; then
+                echo "   channels status allow 列表: $ALLOWED_FROM_STATUS"
+            fi
+        fi
+    fi
+    
+    # 根据验证结果决定下一步
+    if [ "$VALIDATED" = true ]; then
+        echo ""
+        echo "✅ 用户号码配置完成: $USER_NUMBER"
+        break
+    else
+        echo ""
+        echo "请选择:"
+        echo "  1. 重新输入号码"
+        echo "  2. 退出启动"
+        read -p "请输入选项 (1/2): " CHOICE
+        
+        if [ "$CHOICE" = "2" ]; then
+            echo "❌ 用户取消启动"
+            exit 1
+        fi
+        echo ""
+    fi
+done
+
+echo ""
+
 # 检查依赖
 if [ ! -d "__pycache__" ]; then
     echo "📦 检查依赖..."
@@ -108,6 +205,11 @@ cleanup() {
 
 # 注册信号处理器
 trap cleanup SIGINT SIGTERM
+
+# 设置环境变量，将用户号码传递给 Python 应用
+export CURRENT_USER_NUMBER="$USER_NUMBER"
+echo "📤 已将用户号码传递给应用: $USER_NUMBER"
+echo ""
 
 # 启动应用
 python app.py
