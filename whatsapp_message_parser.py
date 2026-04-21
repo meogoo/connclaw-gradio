@@ -84,7 +84,7 @@ class WhatsAppMessageParser:
         line_count = 0
         parsed_count = 0
         filtered_count = 0
-        web_auto_reply_count = 0
+        web_message_count = 0
         
         try:
             with open(self.log_file, 'r', encoding='utf-8', errors='ignore') as f:
@@ -94,11 +94,11 @@ class WhatsAppMessageParser:
                         print(f"⚠️  达到最大行数限制: {max_lines}")
                         break
                     
-                    # 只处理包含 web-auto-reply 的行
-                    if 'web-auto-reply' not in line:
+                    # 只处理包含 web-auto-reply 或 web-human-reply 的行
+                    if 'web-auto-reply' not in line and 'web-human-reply' not in line:
                         continue
                     
-                    web_auto_reply_count += 1
+                    web_message_count += 1
                     
                     # 解析单行日志
                     parsed = self._parse_line(line.strip())
@@ -121,8 +121,32 @@ class WhatsAppMessageParser:
             import traceback
             traceback.print_exc()
         
-        # 按时间戳排序
+        # 按时间戳排序（精确到毫秒）
         messages.sort(key=lambda x: x.get('timestamp', ''))
+        
+        # 去重：时间和内容都完全一样的消息只保留一条
+        unique_messages = []
+        seen = set()
+        duplicate_count = 0
+        
+        for msg in messages:
+            # 创建去重键：时间戳 + 内容 + 方向
+            dedup_key = (
+                msg.get('timestamp', ''),
+                msg.get('content', ''),
+                msg.get('direction', '')
+            )
+            
+            if dedup_key not in seen:
+                seen.add(dedup_key)
+                unique_messages.append(msg)
+            else:
+                duplicate_count += 1
+        
+        if duplicate_count > 0:
+            print(f"   🗑️  已去重: {duplicate_count} 条重复消息")
+        
+        messages = unique_messages
         
         # 更新缓存
         self._cache[cache_key] = {
@@ -136,11 +160,11 @@ class WhatsAppMessageParser:
         print(f"\n{'='*60}")
         print(f"✅ [解析完成]")
         print(f"   总行数: {line_count}")
-        print(f"   web-auto-reply 行: {web_auto_reply_count}")
+        print(f"   WhatsApp 消息行: {web_message_count} (包含 web-auto-reply 和 web-human-reply)")
         print(f"   成功解析: {parsed_count}")
         if contact_filter:
             print(f"   被过滤: {filtered_count}")
-        print(f"   最终消息数: {len(messages)}")
+        print(f"   去重后消息数: {len(messages)}")
         print(f"   缓存已更新 (TTL: {self._cache_ttl}秒)")
         print(f"{'='*60}\n")
         

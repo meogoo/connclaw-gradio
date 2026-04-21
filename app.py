@@ -5,6 +5,7 @@ import uuid
 import time
 import re
 import threading
+import sys
 from datetime import datetime
 from typing import List, Dict, Optional
 import os
@@ -631,12 +632,22 @@ def send_message(user_message: str, chat_history: List):
         
         if result.get('success'):
             print(f"✅ [发送成功] Message ID: {result.get('messageId', 'N/A')}")
-            # 更新聊天历史
+            
+            # 将发送的消息写入日志文件，便于后续加载历史
+            _write_sent_message_to_log(
+                from_number=client.user_number,
+                to_number=client.current_contact,
+                content=user_message,
+                timestamp=datetime.now()
+            )
+            
+            # 更新聊天历史（发出的消息在右，确认消息也在右）
             updated_history = chat_history + [
-                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": user_message},  # 发出的消息显示在右边
                 {"role": "assistant", "content": "✅ 消息已发送"}
             ]
-            print(f"✅ UI 已更新\n")
+            print(f"✅ UI 已更新")
+            print(f"📝 已将发送的消息写入日志文件\n")
             return updated_history, ""
         else:
             error_msg = result.get('error', '未知错误')
@@ -650,6 +661,47 @@ def send_message(user_message: str, chat_history: List):
         return chat_history + [{"role": "assistant", "content": f"❌ 发送异常: {str(e)}"}], ""
 
 
+def _write_sent_message_to_log(from_number: str, to_number: str, content: str, timestamp: datetime):
+    """
+    将发送的消息写入日志文件，格式与 openclaw logs 输出保持一致
+    
+    Args:
+        from_number: 发送人号码（当前用户）
+        to_number: 接收人号码（联系人）
+        content: 消息内容
+        timestamp: 发送时间
+    """
+    log_file = Path(__file__).parent / "whatsapp_messages.log"
+    
+    # 生成时间戳（ISO 8600 格式）
+    timestamp_str = timestamp.strftime("%Y-%m-%dT%H:%M:%S.") + f"{timestamp.microsecond // 1000:03d}Z"
+    
+    # 构造消息体（与 openclaw logs 格式一致）
+    body = f"[WhatsApp {to_number} +0s {timestamp.strftime('%a %Y-%m-%d %H:%M GMT%z')}] {content}"
+    
+    # 构造完整的日志行
+    log_entry = {
+        "connectionId": "local-send",
+        "correlationId": f"SENT-{int(timestamp.timestamp() * 1000)}",
+        "from": from_number,
+        "to": to_number,
+        "body": body,
+        "mediaType": None,
+        "mediaPath": None
+    }
+    
+    # 格式化日志行（使用 web-human-reply 标识人工发送的消息）
+    log_line = f'{timestamp_str} info web-human-reply {{"module":"web-human-reply","runId":"local"}} {json.dumps(log_entry, ensure_ascii=False)} outbound web message\n'
+    
+    try:
+        # 追加写入日志文件
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(log_line)
+        print(f"   📝 日志已写入: {log_file}")
+    except Exception as e:
+        print(f"   ⚠️  写入日志失败: {e}")
+
+
 def refresh_messages(chat_history: List):
     """刷新消息（CLI 模式下暂不支持实时接收）"""
     # CLI 模式通过 subprocess 调用，无法实现真正的实时推送
@@ -658,7 +710,7 @@ def refresh_messages(chat_history: List):
 
 
 # 创建 Gradio 界面
-with gr.Blocks(title="ConnClaw - WhatsApp Chat (CLI Mode)", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="ConnClaw - WhatsApp Chat (CLI Mode)") as demo:
     gr.Markdown("# 🐾 ConnClaw - WhatsApp 聊天 (CLI 模式)")
     gr.Markdown("通过 Open Claw CLI 与 WhatsApp 好友聊天 - **无需 WebSocket 配对**")
     
@@ -690,7 +742,11 @@ with gr.Blocks(title="ConnClaw - WhatsApp Chat (CLI Mode)", theme=gr.themes.Soft
         # 右侧：聊天界面
         with gr.Column(scale=3):
             gr.Markdown("### 💬 聊天")
-            chatbot = gr.Chatbot(label="消息记录", height=500)
+            chatbot = gr.Chatbot(
+                label="消息记录",
+                height=500,
+                avatar_images=(None, "👤")  # (用户头像, AI头像) - 收到的消息无头像，发出的消息显示👤
+            )
             with gr.Row():
                 msg_input = gr.Textbox(
                     label="输入消息", 
@@ -783,4 +839,9 @@ if __name__ == "__main__":
     print("ℹ️  无需 WebSocket 设备配对")
     print("📇 联系人列表将自动排除当前用户")
     print("=" * 60)
-    demo.launch(server_name="0.0.0.0", server_port=7689, share=False)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7689,
+        share=False,
+        theme=gr.themes.Soft()  # Gradio 6.0 要求在 launch() 中传递 theme
+    )
