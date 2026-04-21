@@ -5,13 +5,14 @@ WhatsApp 消息日志解析器
 """
 import json
 import re
+import time
 from datetime import datetime
 from typing import List, Dict, Optional
 from pathlib import Path
 
 
 class WhatsAppMessageParser:
-    """WhatsApp 消息日志解析器"""
+    """WhatsApp 消息日志解析器（带缓存）"""
     
     def __init__(self, log_file: str = None):
         if log_file is None:
@@ -22,49 +23,95 @@ class WhatsAppMessageParser:
         
         # 当前用户的号码（需要从配置中获取，这里暂时硬编码或从环境变量读取）
         self.user_number = None
+        
+        # 缓存机制
+        self._cache = {}  # {contact_id: {"messages": [...], "last_update": timestamp}}
+        self._cache_ttl = 2  # 缓存有效期（秒）
+        self._last_file_size = 0  # 上次文件大小（用于检测文件变化）
+        self._last_parse_time = 0  # 上次解析时间
     
     def set_user_number(self, number: str):
         """设置当前用户的号码"""
         self.user_number = number
     
-    def parse_log_file(self, contact_filter: Optional[str] = None, max_lines: int = 1000) -> List[Dict]:
+    def parse_log_file(self, contact_filter: Optional[str] = None, max_lines: int = 1000, force_refresh: bool = False) -> List[Dict]:
         """
-        解析日志文件，提取消息
+        解析日志文件，提取消息（带缓存）
         
         Args:
             contact_filter: 联系人号码过滤（可选）
             max_lines: 最大处理行数
+            force_refresh: 强制刷新（忽略缓存）
             
         Returns:
             消息列表，按时间戳排序
         """
+        current_time = time.time()
+        
+        # 检查缓存是否有效
+        cache_key = contact_filter or "__all__"
+        if not force_refresh and cache_key in self._cache:
+            cache_entry = self._cache[cache_key]
+            # 缓存未过期且文件未变化
+            if (current_time - cache_entry["last_update"] < self._cache_ttl and
+                self._check_file_unchanged()):
+                print(f"✅ [缓存命中] {cache_key} - 返回 {len(cache_entry['messages'])} 条消息")
+                return cache_entry["messages"]
+            else:
+                if current_time - cache_entry["last_update"] >= self._cache_ttl:
+                    print(f"⏰ [缓存过期] {cache_key} - 已存在 {int(current_time - cache_entry['last_update'])} 秒 (TTL: {self._cache_ttl}秒)")
+                else:
+                    print(f"📄 [文件变化] {cache_key} - 检测到日志文件大小变化")
+        
+        # 缓存无效，重新解析
+        print(f"\n{'='*60}")
+        print(f"🔍 [开始解析] 日志文件: {self.log_file}")
+        print(f"   用户号码: {self.user_number}")
+        if contact_filter:
+            print(f"   联系人过滤: {contact_filter}")
+        print(f"   最大行数: {max_lines}")
+        print(f"{'='*60}")
+        
         if not self.log_file.exists():
             print(f"⚠️  日志文件不存在: {self.log_file}")
             return []
         
+        # 显示文件大小
+        file_size = self.log_file.stat().st_size
+        print(f"📊 日志文件大小: {file_size} 字节 ({file_size/1024:.2f} KB)")
+        
         messages = []
         line_count = 0
+        parsed_count = 0
+        filtered_count = 0
+        web_auto_reply_count = 0
         
         try:
             with open(self.log_file, 'r', encoding='utf-8', errors='ignore') as f:
                 for line in f:
                     line_count += 1
                     if line_count > max_lines:
+                        print(f"⚠️  达到最大行数限制: {max_lines}")
                         break
                     
                     # 只处理包含 web-auto-reply 的行
                     if 'web-auto-reply' not in line:
                         continue
                     
+                    web_auto_reply_count += 1
+                    
                     # 解析单行日志
                     parsed = self._parse_line(line.strip())
                     if parsed:
+                        parsed_count += 1
+                        
                         # 如果指定了联系人过滤
                         if contact_filter:
                             from_num = parsed.get('from', '')
                             to_num = parsed.get('to', '')
                             # 检查是否与该联系人相关
                             if contact_filter not in from_num and contact_filter not in to_num:
+                                filtered_count += 1
                                 continue
                         
                         messages.append(parsed)
@@ -77,9 +124,41 @@ class WhatsAppMessageParser:
         # 按时间戳排序
         messages.sort(key=lambda x: x.get('timestamp', ''))
         
-        print(f"✅ 解析完成，共找到 {len(messages)} 条消息（处理了 {line_count} 行）")
+        # 更新缓存
+        self._cache[cache_key] = {
+            "messages": messages,
+            "last_update": current_time
+        }
+        self._last_file_size = self.log_file.stat().st_size if self.log_file.exists() else 0
+        self._last_parse_time = current_time
+        
+        # 打印解析统计
+        print(f"\n{'='*60}")
+        print(f"✅ [解析完成]")
+        print(f"   总行数: {line_count}")
+        print(f"   web-auto-reply 行: {web_auto_reply_count}")
+        print(f"   成功解析: {parsed_count}")
+        if contact_filter:
+            print(f"   被过滤: {filtered_count}")
+        print(f"   最终消息数: {len(messages)}")
+        print(f"   缓存已更新 (TTL: {self._cache_ttl}秒)")
+        print(f"{'='*60}\n")
         
         return messages
+    
+    def _check_file_unchanged(self) -> bool:
+        """检查文件是否未变化"""
+        if not self.log_file.exists():
+            return False
+        
+        current_size = self.log_file.stat().st_size
+        return current_size == self._last_file_size
+    
+    def clear_cache(self):
+        """清除所有缓存"""
+        self._cache.clear()
+        self._last_file_size = 0
+        self._last_parse_time = 0
     
     def _parse_line(self, line: str) -> Optional[Dict]:
         """
@@ -185,8 +264,12 @@ class WhatsAppMessageParser:
             try:
                 dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
                 formatted_time = dt.strftime("%Y-%m-%d %H:%M:%S")
-            except:
+            except Exception as e:
+                print(f"⚠️  时间戳转换失败: {e}, 原始值: {timestamp_str}")
                 formatted_time = timestamp_str
+            
+            # 调试日志：显示解析结果
+            print(f"📨 [解析成功] {direction} | From: {from_number} -> To: {to_number} | Content: {content[:50]}{'...' if len(content) > 50 else ''}")
             
             return {
                 "role": "user" if direction == "inbound" else "assistant",
@@ -201,8 +284,9 @@ class WhatsAppMessageParser:
             }
         
         except Exception as e:
-            # 静默失败，避免刷屏
-            # print(f"⚠️  解析失败: {e} | Line: {line[:100]}")
+            # 打印解析失败的详细信息，便于调试
+            print(f"⚠️  [解析失败] {type(e).__name__}: {e}")
+            print(f"   Line preview: {line[:150]}...")
             return None
 
 

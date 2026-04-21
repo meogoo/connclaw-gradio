@@ -164,11 +164,12 @@ LOG_FILE="$(pwd)/whatsapp_messages.log"
 if pgrep -f "openclaw logs.*grep.*whatsapp.*web-auto-reply" > /dev/null; then
     echo "⚠️  检测到已有的日志监听进程，跳过启动"
 else
-    # 启动后台监听进程
-    nohup bash -c "openclaw logs --follow 2>&1 | grep -i whatsapp | grep web-auto-reply >> '$LOG_FILE'" > /dev/null 2>&1 &
+    # 启动后台监听进程（使用 stdbuf 禁用缓冲，确保实时写入）
+    nohup bash -c "stdbuf -oL -eL openclaw logs --follow 2>&1 | stdbuf -oL grep -i whatsapp | stdbuf -oL grep web-auto-reply >> '$LOG_FILE'" > /dev/null 2>&1 &
     LISTENER_PID=$!
     echo "✅ 日志监听器已启动 (PID: $LISTENER_PID)"
     echo "   日志文件: $LOG_FILE"
+    echo "   📌 已启用行缓冲模式，确保实时写入"
     
     # 保存 PID 到文件，方便后续管理
     echo $LISTENER_PID > "$(pwd)/.listener.pid"

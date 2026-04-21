@@ -436,13 +436,15 @@ class OpenClawCLI:
     
     def get_messages(self, contact_id: str, limit: int = 50) -> List[Dict]:
         """获取历史消息（从 WhatsApp 日志文件读取）"""
-        print(f"📜 获取与 {contact_id} 的会话历史...")
+        print(f"\n{'='*60}")
+        print(f"📜 [获取消息] 联系人: {contact_id}")
+        print(f"   返回数量限制: {limit}")
+        print(f"{'='*60}")
         
         # user_number 已在 __init__ 中强制设置，这里直接使用
         # 不需要再从其他地方读取
         
         # 从日志文件中解析消息
-        print("🔍 从 WhatsApp 日志文件读取消息...")
         try:
             messages = self.whatsapp_parser.parse_log_file(
                 contact_filter=contact_id,
@@ -450,13 +452,15 @@ class OpenClawCLI:
             )
             
             if messages:
-                print(f"✅ 从日志文件读取到 {len(messages)} 条消息")
+                print(f"✅ [成功] 从日志文件读取到 {len(messages)} 条消息")
                 # 返回最近的 limit 条
-                return messages[-limit:]
+                result = messages[-limit:]
+                print(f"📤 返回最近 {len(result)} 条消息\n")
+                return result
             else:
                 print("⚠️  日志文件中暂无该联系人的消息")
         except Exception as e:
-            print(f"⚠️  日志文件读取失败: {e}")
+            print(f"❌ 日志文件读取失败: {e}")
             import traceback
             traceback.print_exc()
         
@@ -466,7 +470,7 @@ class OpenClawCLI:
             cached_messages = self.log_parser.message_cache.get_messages(contact_id, limit)
             
             if cached_messages:
-                print(f"✅ 从缓存读取到 {len(cached_messages)} 条消息")
+                print(f"✅ [成功] 从缓存读取到 {len(cached_messages)} 条消息")
                 return cached_messages
             else:
                 print("⚠️  缓存中也暂无该联系人的消息")
@@ -480,7 +484,7 @@ class OpenClawCLI:
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }]
         
-        print(f"✅ 返回 {len(messages)} 条记录")
+        print(f"✅ 返回 {len(messages)} 条记录（提示信息）\n")
         return messages
     
     def select_contact(self, contact_id: str):
@@ -554,7 +558,9 @@ def select_contact(contact_id: str):
     if not contact_id:
         return [], "⚠️  请先选择一个联系人"
     
-    print(f"📌 尝试选择联系人 ID: {contact_id}")
+    print(f"\n{'='*60}")
+    print(f"👤 [选择联系人] ID: {contact_id}")
+    print(f"{'='*60}")
     
     # 查找联系人（支持按 ID 匹配）
     contact = next((c for c in client.contacts_cache if c['id'] == contact_id), None)
@@ -566,14 +572,38 @@ def select_contact(contact_id: str):
     
     current_contact_name = contact['name']
     client.select_contact(contact['id'])
+    print(f"✅ 已选择联系人: {contact['name']} ({contact['id']})")
     
     # 加载历史消息
     messages = client.get_messages(contact['id'])
     
     status_msg = f"💬 正在与 {contact['name']} 聊天"
-    print(f"✅ {status_msg}")
+    print(f"✅ {status_msg}\n")
     
     return messages, status_msg
+
+
+def refresh_current_chat():
+    """刷新当前聊天（用于定时器）"""
+    global client
+    
+    if not client or not client.current_contact:
+        return gr.update()
+    
+    print(f"\n{'='*60}")
+    print(f"⏰ [定时刷新] 联系人: {client.current_contact}")
+    print(f"   触发时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*60}")
+    
+    # 清除缓存，强制重新读取
+    print("🗑️  清除缓存...")
+    client.whatsapp_parser.clear_cache()
+    
+    # 重新获取消息
+    messages = client.get_messages(client.current_contact)
+    
+    print(f"✅ [刷新完成] 返回 {len(messages)} 条消息\n")
+    return gr.update(value=messages)
 
 
 def send_message(user_message: str, chat_history: List):
@@ -589,21 +619,34 @@ def send_message(user_message: str, chat_history: List):
     if not client.current_contact:
         return chat_history + [{"role": "assistant", "content": "❌ 请先选择联系人"}], ""
     
+    print(f"\n{'='*60}")
+    print(f"📤 [发送消息]")
+    print(f"   联系人: {client.current_contact}")
+    print(f"   内容: {user_message[:50]}{'...' if len(user_message) > 50 else ''}")
+    print(f"{'='*60}")
+    
     # 发送消息
     try:
         result = client.send_message(client.current_contact, user_message)
         
         if result.get('success'):
+            print(f"✅ [发送成功] Message ID: {result.get('messageId', 'N/A')}")
             # 更新聊天历史
             updated_history = chat_history + [
                 {"role": "user", "content": user_message},
                 {"role": "assistant", "content": "✅ 消息已发送"}
             ]
+            print(f"✅ UI 已更新\n")
             return updated_history, ""
         else:
-            return chat_history + [{"role": "assistant", "content": f"❌ 发送失败: {result.get('error')}"}], ""
+            error_msg = result.get('error', '未知错误')
+            print(f"❌ [发送失败] {error_msg}")
+            return chat_history + [{"role": "assistant", "content": f"❌ 发送失败: {error_msg}"}], ""
             
     except Exception as e:
+        print(f"❌ [发送异常] {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         return chat_history + [{"role": "assistant", "content": f"❌ 发送异常: {str(e)}"}], ""
 
 
@@ -618,6 +661,9 @@ def refresh_messages(chat_history: List):
 with gr.Blocks(title="ConnClaw - WhatsApp Chat (CLI Mode)", theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 🐾 ConnClaw - WhatsApp 聊天 (CLI 模式)")
     gr.Markdown("通过 Open Claw CLI 与 WhatsApp 好友聊天 - **无需 WebSocket 配对**")
+    
+    # 添加定时器（每2秒刷新一次）
+    refresh_timer = gr.Timer(value=2)
     
     with gr.Row():
         # 左侧：联系人列表
@@ -681,6 +727,12 @@ with gr.Blocks(title="ConnClaw - WhatsApp Chat (CLI Mode)", theme=gr.themes.Soft
     ).then(
         fn=lambda: (gr.update(interactive=True, placeholder="输入消息后按 Enter 或点击发送..."), gr.update(interactive=True)),
         outputs=[msg_input, send_btn]
+    )
+    
+    # 定时器触发刷新
+    refresh_timer.tick(
+        fn=refresh_current_chat,
+        outputs=[chatbot]
     )
     
     send_btn.click(
