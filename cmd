@@ -7,3 +7,9 @@ Executing transaction: done
 # To deactivate an active environment, use
 #
 #     $ conda deactivate
+#
+#
+
+
+kill <PID>              # 发送 SIGTERM，优雅退出
+pkill -f "start.sh"     # 按名称查找并停止
